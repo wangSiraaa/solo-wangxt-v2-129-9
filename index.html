@@ -5,11 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>不规则宫温度计数独 · 作者工作室</title>
     <!--
-      z3-solver 的 emscripten/pthreads 构建必须作为独立脚本加载（不能进 bundle），
-      它会在全局注册 initZ3。需要 COOP/COEP 响应头才能使用 SharedArrayBuffer，
+      Z3 的 emscripten/pthreads 产物（vendor/z3-built.js + z3-built.wasm）不进 bundle，
+      由检查 Worker 在运行时自行 fetch 并初始化（见 src/lib/z3-worker-init.ts），
+      主页面不再同步加载 Z3。SharedArrayBuffer 需要 COOP/COEP 响应头，
       开发服务器（vite.config.ts）与本地预览（scripts/serve.mjs）均已设置。
     -->
-    <script src="./vendor/z3-built.js"></script>
   </head>
   <body>
     <div id="app"></div>

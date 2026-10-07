@@ -28,6 +28,9 @@ import {
 
 export type Verdict = 'unique' | 'multiple' | 'unsat' | 'unknown';
 
+/** 检查阶段：编码 -> 第一次求解 -> 排除首解后再求解（供 UI 展示进度） */
+export type CheckPhase = 'encode' | 'check1' | 'check2';
+
 export interface ConflictItem {
   /** 作者可读的约束描述 */
   label: string;
@@ -202,12 +205,14 @@ function extractConflict(solver: any, groups: Map<string, ConflictItem>): Confli
 /**
  * 完整检查：可解性 + 唯一解（排除首解再求）。
  * @param timeoutMs 每次 check 的 Z3 超时（毫秒）；两次 check 各自独立计时
+ * @param onPhase 阶段回调（encode/check1/check2），用于在 Worker 中向主线程汇报进度
  */
 export async function analyzePuzzle(
   z3: Z3HighLevel,
   puzzle: Puzzle,
   structural: StructuralIssue[],
-  timeoutMs = 5000
+  timeoutMs = 5000,
+  onPhase?: (phase: CheckPhase) => void
 ): Promise<SolveResult> {
   const started = performance.now();
   const finish = (
@@ -237,9 +242,11 @@ export async function analyzePuzzle(
     const solver = new ctx.Solver();
     solver.set('timeout', Math.max(1, Math.floor(timeoutMs)));
 
+    onPhase?.('encode');
     const encoding = encodePuzzle(ctx, solver, puzzle);
 
     // ---- 第一次求解 ----
+    onPhase?.('check1');
     const r1 = await solver.check();
     if (r1 === 'unknown') {
       return finish('unknown', { reason: solver.reasonUnknown() || 'timeout' });
@@ -252,6 +259,7 @@ export async function analyzePuzzle(
     // ---- 排除首解：至少一格与 M1 不同，然后再次求解 ----
     solver.add(Or(...encoding.x.map((arr, i) => arr[solution[i] - 1].not())));
 
+    onPhase?.('check2');
     const r2 = await solver.check();
     if (r2 === 'unknown') {
       // 找到至少一个解，但无法在时限内排除第二个解 => 未判定，不能宣称唯一

@@ -23,21 +23,25 @@
     busy = true;
     try {
       let id = editor.draftId;
-      const fp = puzzleFingerprint(editor.puzzle);
+      // 结论与指纹绑定保存：只存"检查通过那一刻"的指纹，重开时指纹不符即丢弃结论。
+      // $state 代理不可 structuredClone，先快照成纯数据。
+      const checkFp = editor.analysis.status === 'done' ? editor.analysis.fingerprint : null;
+      const lastCheck = editor.analysis.result ? $state.snapshot(editor.analysis.result) : null;
+      const puzzleData = $state.snapshot(editor.puzzle);
       if (!id) {
-        const rec = draftFromPuzzle(editor.draftName, editor.puzzle);
-        rec.lastCheck = editor.analysis.result;
-        rec.checkFingerprint = editor.analysis.status === 'done' ? fp : null;
+        const rec = draftFromPuzzle(editor.draftName, puzzleData);
+        rec.lastCheck = lastCheck;
+        rec.checkFingerprint = checkFp;
         await saveDraft(rec);
         id = rec.id;
         editor.draftId = id;
       } else {
-        const existing = (await loadDraft(id)) ?? draftFromPuzzle(editor.draftName, editor.puzzle);
+        const existing = (await loadDraft(id)) ?? draftFromPuzzle(editor.draftName, puzzleData);
         existing.name = editor.draftName;
         existing.updatedAt = Date.now();
-        existing.puzzle = structuredClone(editor.puzzle);
-        existing.lastCheck = editor.analysis.result;
-        existing.checkFingerprint = editor.analysis.status === 'done' ? fp : null;
+        existing.puzzle = puzzleData;
+        existing.lastCheck = lastCheck;
+        existing.checkFingerprint = checkFp;
         await saveDraft(existing);
       }
       message = `已保存 ${new Date().toLocaleTimeString()}`;
@@ -53,8 +57,17 @@
     const rec = await loadDraft(id);
     if (!rec) return;
     editor.init(structuredClone(rec.puzzle), rec.id, rec.name);
+    // 只恢复与当前题面指纹相符的结论；指纹不符的旧结论直接丢弃
     if (rec.lastCheck && rec.checkFingerprint === puzzleFingerprint(rec.puzzle)) {
-      editor.analysis = { status: 'done', result: rec.lastCheck, fingerprint: rec.checkFingerprint, error: null };
+      editor.analysis = {
+        status: 'done',
+        result: rec.lastCheck,
+        fingerprint: rec.checkFingerprint,
+        error: null,
+        phase: null,
+        startedAt: null,
+        budgetMs: null
+      };
     }
     message = `已打开草稿「${rec.name}」`;
   }

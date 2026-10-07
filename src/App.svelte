@@ -11,7 +11,7 @@
 
   onMount(() => {
     editor.init(standardSample(), null, '标准样例-唯一解');
-    editor.loadZ3();
+    editor.startEngine();
 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -57,8 +57,8 @@
   </div>
 
   <footer>
-    求解由 Z3 WASM 在本地浏览器完成，无后台服务；唯一解判定采用
-    <em>先求首解、再排除首解重求</em> 的两次检查。
+    求解由 Z3 WASM 在本地浏览器的独立 Worker 中完成（可取消、带耗时预算），无后台服务；
+    唯一解判定采用 <em>先求首解、再排除首解重求</em> 的两次检查。
   </footer>
 </main>
 

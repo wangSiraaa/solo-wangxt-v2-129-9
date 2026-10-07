@@ -20,6 +20,21 @@
 
 任何一次 `check` 超时都显示"未判定"，绝不把"只找到一次结果"当成唯一。
 
+## 可取消的检查任务与耗时预算
+
+检查在**独立 Web Worker** 中运行（`src/lib/check.worker.ts`），Z3 的同步 WASM
+执行不再占用页面；界面实时显示**阶段**（编码 → 求首解 → 排除首解再求）、**用时**
+与**取消按钮**（`src/lib/check-runner.ts` 负责 Worker 生命周期）：
+
+- **取消**：Z3 的 `check()` 会占满 Worker 线程，无法响应取消消息，因此取消即
+  `terminate()` 整个 Worker，下次检查自动重建。取消只记录**未判定**——未完成的
+  首解不会被保留为结论。
+- **耗时预算**：除每次 check 的 Z3 软超时外，整个任务还有墙钟预算
+  （`2 × 单次超时 + 余量`，见 `checkBudgetMs`）。超预算同样终止 Worker 并记
+  **未判定**。
+- **题面变化即作废**：检查期间题面一旦改动，在途任务立即取消，迟到的旧 Worker
+  结果不会回写新题面；重试总是对**当前指纹**发起（`src/lib/state.test.ts` 覆盖）。
+
 ## 求解前的结构校验（`src/lib/puzzle.ts`）
 
 在调用 Z3 之前先做与可解性无关的"语法层"校验，错误会在画布高亮：
@@ -87,32 +102,38 @@ node scripts/gen-samples.mjs   # 生成不规则宫、最小化提示，双重 c
 ```bash
 npm install        # 会自动把 z3 的 wasm 产物复制到 public/vendor
 npm run dev        # 开发服务器（已带 COOP/COEP 头）
-npm test           # 21 个单测（含 Z3 对三类样例的判定）
+npm test           # 27 个单测（含 Z3 对三类样例的判定）
 npm run check      # svelte-check 类型检查
 npm run build      # 产出 dist/
 node scripts/serve.mjs dist   # 以 COOP/COEP 头本地预览
+npm run test:e2e   # 真实 Chromium 冒烟：Worker 检查/取消/指纹失效（需 npx playwright install chromium）
 ```
 
 > Z3 的 pthreads WASM 需要 `SharedArrayBuffer`，页面必须带
 > `Cross-Origin-Opener-Policy: same-origin` 与
 > `Cross-Origin-Embedder-Policy: require-corp` 响应头。`vite dev` 与
 > `scripts/serve.mjs` 都已配置；若部署到其它静态主机，请自行加上这两个响应头。
-> `z3-built.js` / `z3-built.wasm` 必须作为独立静态资源由 `index.html` 直接加载，
-> 不能被打包器合并。
+> `z3-built.js` / `z3-built.wasm` 必须作为独立静态资源保留在 `vendor/`，
+> 由检查 Worker 在运行时自行 fetch（`src/lib/z3-worker-init.ts`），不能被打包器合并。
 
 ## 目录
 
 ```
 src/lib/puzzle.ts        # 领域模型 + 结构校验 + 导入导出
-src/lib/solver.ts        # Bool CNF 编码、addAndTrack 标注、两次 check、矛盾核
-src/lib/z3-init.ts       # 浏览器(全局 initZ3)/Node 双入口初始化
+src/lib/solver.ts        # Bool CNF 编码、addAndTrack 标注、两次 check、矛盾核、阶段回调
+src/lib/check-types.ts   # 检查执行器接口、取消错误、Worker 消息协议
+src/lib/check-runner.ts  # 主线程侧 Worker 生命周期：取消=terminate、耗时预算
+src/lib/check.worker.ts  # 独立 Worker 中运行双次 SAT 检查
+src/lib/z3-worker-init.ts# Worker 内加载 vendor 的 z3-built.js/wasm
+src/lib/z3-init.ts       # Node/vitest 用 Z3 初始化（单测直接调 solver）
 src/lib/samples.ts       # 三类样例
 src/lib/sample-data.ts   # 生成脚本固化的数据（无答案层）
 src/lib/storage.ts       # IndexedDB 题稿
-src/lib/state.svelte.ts  # 编辑器状态、指纹失效
+src/lib/state.svelte.ts  # 编辑器状态、指纹失效、检查任务编排
 src/components/*         # Canvas / 工具栏 / 检查面板 / 草稿 / 导入导出
 scripts/gen-regions.mjs  # 不规则宫生成
 scripts/gen-samples.mjs  # 样例生成 + 双重 check 验证
 scripts/copy-z3.mjs      # 复制 wasm 产物
 scripts/serve.mjs        # 带 COOP/COEP 头的静态服务器
+scripts/e2e-worker-check.mjs # Chromium 端到端冒烟（Worker 检查/取消/指纹）
 ```
