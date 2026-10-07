@@ -28,6 +28,34 @@ import {
 
 export type Verdict = 'unique' | 'multiple' | 'unsat' | 'unknown';
 
+/** 双次 SAT 流程当前所处阶段（界面展示用） */
+export type CheckStage =
+  | 'structure'
+  | 'encoding'
+  | 'check-sat-1'
+  | 'check-sat-2'
+  | 'done';
+
+export interface AnalyzeHooks {
+  /** 阶段切换通知（在 Worker 中会转发给界面） */
+  onStage?: (stage: CheckStage) => void;
+  /**
+   * 注册"外部中断"回调。Worker 收到取消消息时调用它，
+   * 进而触发 Z3 context 级中断；若 check 因事件循环阻塞收不到消息，
+   * 界面会直接 terminate 整个 Worker 兜底。
+   */
+  registerInterrupt?: (interrupt: () => void) => void;
+  /** 是否已被外部取消（每次 await 边界检查） */
+  isCancelled?: () => boolean;
+  /**
+   * 整个检查任务的总耗时预算（毫秒），两次 check 共享。
+   * 每次 check 前取剩余预算作为该次 Z3 超时。
+   * 与单次 timeoutMs 不同：超总预算属于"未判定（被取消/超预算）"，
+   * 不保留未完成的首解作为结论。
+   */
+  totalBudgetMs?: number;
+}
+
 export interface ConflictItem {
   /** 作者可读的约束描述 */
   label: string;
@@ -202,14 +230,30 @@ function extractConflict(solver: any, groups: Map<string, ConflictItem>): Confli
 /**
  * 完整检查：可解性 + 唯一解（排除首解再求）。
  * @param timeoutMs 每次 check 的 Z3 超时（毫秒）；两次 check 各自独立计时
+ * @param hooks     阶段上报 / 中断注册 / 取消信号 / 总预算（Worker 使用）
  */
 export async function analyzePuzzle(
   z3: Z3HighLevel,
   puzzle: Puzzle,
   structural: StructuralIssue[],
-  timeoutMs = 5000
+  timeoutMs = 5000,
+  hooks: AnalyzeHooks = {}
 ): Promise<SolveResult> {
   const started = performance.now();
+  const { onStage, registerInterrupt, isCancelled, totalBudgetMs } = hooks;
+  const cancelled = () => isCancelled?.() === true;
+  /** 剩余总预算（毫秒）；未配置总预算时退回单次 timeoutMs */
+  const remainingBudget = () => {
+    if (!totalBudgetMs || !Number.isFinite(totalBudgetMs)) return timeoutMs;
+    return Math.max(1, Math.floor(totalBudgetMs - (performance.now() - started)));
+  };
+  /**
+   * 取消或超总预算 => 未判定。绝不携带首解：
+   * 即使 check1 已得到 M1，被取消/超预算意味着没能完成完整流程，
+   * 不允许把"未完成的首解"保留成唯一结论。
+   */
+  const aborted = (reason: string): SolveResult =>
+    finish('unknown', { reason, elapsedMs: performance.now() - started });
   const finish = (
     verdict: Verdict,
     rest: Partial<SolveResult> = {}
@@ -224,43 +268,92 @@ export async function analyzePuzzle(
   });
 
   // 结构非法属于"编辑期"错误，直接作为矛盾信息返回，不调用 Z3。
+  onStage?.('structure');
   if (structural.length) {
+    onStage?.('done');
     return finish('unsat', {
       reason: 'structure-invalid',
       conflict: structural.map((i) => ({ label: i.message, cells: i.cells }))
     });
   }
+  if (cancelled()) {
+    onStage?.('done');
+    return aborted('cancelled');
+  }
 
   const ctx = new z3.Context('solver');
   try {
+    registerInterrupt?.(() => ctx.interrupt());
     const { Or } = ctx;
     const solver = new ctx.Solver();
-    solver.set('timeout', Math.max(1, Math.floor(timeoutMs)));
 
+    onStage?.('encoding');
     const encoding = encodePuzzle(ctx, solver, puzzle);
+    if (cancelled()) {
+      onStage?.('done');
+      return aborted('cancelled');
+    }
 
     // ---- 第一次求解 ----
+    onStage?.('check-sat-1');
+    const budget1 = remainingBudget();
+    if (budget1 <= 1 && totalBudgetMs) {
+      onStage?.('done');
+      return aborted('budget-exceeded');
+    }
+    solver.set('timeout', Math.max(1, Math.floor(Math.min(timeoutMs, budget1))));
     const r1 = await solver.check();
+    if (cancelled()) {
+      onStage?.('done');
+      return aborted('cancelled');
+    }
     if (r1 === 'unknown') {
-      return finish('unknown', { reason: solver.reasonUnknown() || 'timeout' });
+      onStage?.('done');
+      // check1 自身超时：可能连一个解都没拿到，也无法证明无解 => 未判定
+      const overBudget = totalBudgetMs != null && remainingBudget() <= 1;
+      return finish('unknown', {
+        reason: overBudget ? 'budget-exceeded' : solver.reasonUnknown() || 'timeout'
+      });
     }
     if (r1 === 'unsat') {
+      onStage?.('done');
       return finish('unsat', { conflict: extractConflict(solver, encoding.groups) });
     }
     const solution = readGrid(solver.model(), encoding.x);
 
     // ---- 排除首解：至少一格与 M1 不同，然后再次求解 ----
+    onStage?.('check-sat-2');
+    const budget2 = remainingBudget();
+    if (totalBudgetMs && budget2 <= 1) {
+      onStage?.('done');
+      // 首解之外没能完成第二次检查 => 未判定，不保留首解
+      return aborted('budget-exceeded');
+    }
+    solver.set('timeout', Math.max(1, Math.floor(Math.min(timeoutMs, budget2))));
     solver.add(Or(...encoding.x.map((arr, i) => arr[solution[i] - 1].not())));
 
     const r2 = await solver.check();
+    if (cancelled()) {
+      onStage?.('done');
+      return aborted('cancelled');
+    }
     if (r2 === 'unknown') {
-      // 找到至少一个解，但无法在时限内排除第二个解 => 未判定，不能宣称唯一
-      return finish('unknown', { solution, reason: solver.reasonUnknown() || 'timeout' });
+      onStage?.('done');
+      // 找到至少一个解，但无法在时限内排除第二个解。
+      // 总预算耗尽 => 未判定且不保留首解；
+      // 仅是第二次 check 的 Z3 自身超时 => 保留首解供界面参考，但仍不宣称唯一。
+      const overBudget = totalBudgetMs != null && remainingBudget() <= 1;
+      return finish('unknown', {
+        reason: overBudget ? 'budget-exceeded' : solver.reasonUnknown() || 'timeout',
+        ...(overBudget ? {} : { solution })
+      });
     }
     if (r2 === 'unsat') {
+      onStage?.('done');
       return finish('unique', { solution });
     }
     const witness = readGrid(solver.model(), encoding.x);
+    onStage?.('done');
     return finish('multiple', { solution, witness });
   } finally {
     (ctx as { __release?: () => void }).__release?.();

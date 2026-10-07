@@ -54,7 +54,7 @@
     if (!rec) return;
     editor.init(structuredClone(rec.puzzle), rec.id, rec.name);
     if (rec.lastCheck && rec.checkFingerprint === puzzleFingerprint(rec.puzzle)) {
-      editor.analysis = { status: 'done', result: rec.lastCheck, fingerprint: rec.checkFingerprint, error: null };
+      editor.analysis = { status: 'done', result: rec.lastCheck, fingerprint: rec.checkFingerprint, error: null, stage: null, elapsedMs: rec.lastCheck.elapsedMs };
     }
     message = `已打开草稿「${rec.name}」`;
   }

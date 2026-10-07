@@ -24,7 +24,9 @@ describe('改变提示后旧结论失效', () => {
         elapsedMs: 1
       },
       fingerprint: fpBefore,
-      error: null
+      error: null,
+      stage: null,
+      elapsedMs: 1
     };
     expect(ed.analysis.status).toBe('done');
 

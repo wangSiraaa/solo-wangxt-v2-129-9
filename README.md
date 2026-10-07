@@ -20,6 +20,25 @@
 
 任何一次 `check` 超时都显示"未判定"，绝不把"只找到一次结果"当成唯一。
 
+## 可取消的检查任务（独立 Worker + 耗时预算）
+
+复杂题目的 SAT 检查可能长时间占用页面，因此检查流程全部在
+**独立 Web Worker**（`src/lib/solver.worker.ts`）内运行：
+
+- Worker 自行初始化 Z3 WASM（fetch `vendor/z3-built.js` 后在全局作用域运行，
+  并注入 `locateFile`/`mainScriptUrlOrBlob` 以定位 wasm 与 pthread 自举脚本），
+  界面线程只收发消息（协议见 `src/lib/check-protocol.ts`）。
+- 界面展示**当前阶段**（结构校验 / 编码 / 第 1 次检查 / 第 2 次检查）与
+  **实时用时**，并提供**取消按钮**。取消触发 Z3 context 级 `interrupt()`；
+  题面变更等场景则直接 `terminate()` 旧 Worker 兜底。
+- **总耗时预算** = 两次 check 超时之和，每次 check 取剩余预算作为 Z3 超时。
+  **取消或超总预算一律记为"未判定"（`cancelled` / `budget-exceeded`），
+  不携带任何首解**——即使第一次 check 已求出 M1，也不保留为唯一结论。
+  （只有第二次 check 自身 Z3 超时 `timeout` 时才保留首解作参考，仍不宣称唯一。）
+- **旧结果防回写**：每个检查任务带自增 `runId` 与启动时题面指纹；检查期间
+  题面一旦变化，旧 Worker 立即终止，其迟到结果还会被 `runId` 与
+  "结果指纹 === 当前题面指纹"双重校验丢弃。取消后立即重试使用**当前指纹**。
+
 ## 求解前的结构校验（`src/lib/puzzle.ts`）
 
 在调用 Z3 之前先做与可解性无关的"语法层"校验，错误会在画布高亮：
@@ -87,7 +106,7 @@ node scripts/gen-samples.mjs   # 生成不规则宫、最小化提示，双重 c
 ```bash
 npm install        # 会自动把 z3 的 wasm 产物复制到 public/vendor
 npm run dev        # 开发服务器（已带 COOP/COEP 头）
-npm test           # 21 个单测（含 Z3 对三类样例的判定）
+npm test           # 31 个单测（含 Z3 对三类样例的判定、取消/预算、Worker 竞态）
 npm run check      # svelte-check 类型检查
 npm run build      # 产出 dist/
 node scripts/serve.mjs dist   # 以 COOP/COEP 头本地预览
@@ -104,12 +123,14 @@ node scripts/serve.mjs dist   # 以 COOP/COEP 头本地预览
 
 ```
 src/lib/puzzle.ts        # 领域模型 + 结构校验 + 导入导出
-src/lib/solver.ts        # Bool CNF 编码、addAndTrack 标注、两次 check、矛盾核
-src/lib/z3-init.ts       # 浏览器(全局 initZ3)/Node 双入口初始化
+src/lib/solver.ts        # Bool CNF 编码、addAndTrack 标注、两次 check、矛盾核、hooks（阶段/中断/预算）
+src/lib/check-protocol.ts# 主线程 <-> Worker 消息协议
+src/lib/solver.worker.ts # 检查 Worker：独立初始化 Z3、运行双次 SAT、上报阶段
+src/lib/z3-init.ts       # Node 测试入口的 Z3 初始化（浏览器改由 Worker 自举）
 src/lib/samples.ts       # 三类样例
 src/lib/sample-data.ts   # 生成脚本固化的数据（无答案层）
 src/lib/storage.ts       # IndexedDB 题稿
-src/lib/state.svelte.ts  # 编辑器状态、指纹失效
+src/lib/state.svelte.ts  # 编辑器状态、指纹失效、可取消检查任务（runId 防回写）
 src/components/*         # Canvas / 工具栏 / 检查面板 / 草稿 / 导入导出
 scripts/gen-regions.mjs  # 不规则宫生成
 scripts/gen-samples.mjs  # 样例生成 + 双重 check 验证

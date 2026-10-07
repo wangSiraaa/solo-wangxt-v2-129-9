@@ -50,4 +50,60 @@ describe('Z3 样例判定（双重 check：排除首解再求）', () => {
     expect(res.reason).toBe('structure-invalid');
     expect(res.conflict.length).toBeGreaterThan(0);
   });
+
+  it('阶段回调覆盖结构/编码/两次检查/完成', async () => {
+    const stages: string[] = [];
+    const res = await analyzePuzzle(
+      z3,
+      standardSample(),
+      [],
+      20000,
+      { onStage: (s) => stages.push(s) }
+    );
+    expect(res.verdict).toBe('unique');
+    expect(stages).toEqual(['structure', 'encoding', 'check-sat-1', 'check-sat-2', 'done']);
+  }, 60000);
+
+  it('总预算为 1ms：判定未判定（budget-exceeded），且不保留首解', async () => {
+    const res = await analyzePuzzle(z3, standardSample(), [], 20000, {
+      totalBudgetMs: 1
+    });
+    expect(res.verdict).toBe('unknown');
+    expect(res.reason).toBe('budget-exceeded');
+    // 超预算绝不能把未完成的首解保留为结论
+    expect(res.solution).toBeNull();
+    expect(res.witness).toBeNull();
+  }, 60000);
+
+  it('启动前即取消：直接未判定（cancelled），不调用求解', async () => {
+    const res = await analyzePuzzle(z3, standardSample(), [], 20000, {
+      isCancelled: () => true
+    });
+    expect(res.verdict).toBe('unknown');
+    expect(res.reason).toBe('cancelled');
+    expect(res.solution).toBeNull();
+  });
+
+  it('求解中收到中断+取消：未判定（cancelled），不保留首解', async () => {
+    let interrupt: (() => void) | null = null;
+    let cancelled = false;
+    const pending = analyzePuzzle(z3, standardSample(), [], 20000, {
+      registerInterrupt: (fn) => {
+        interrupt = fn;
+      },
+      isCancelled: () => cancelled,
+      onStage: (stage) => {
+        // 确定性地在第二次检查开始时取消（首解已求出，正排除首解）
+        if (stage === 'check-sat-2') {
+          cancelled = true;
+          interrupt?.();
+        }
+      }
+    });
+    const res = await pending;
+    expect(res.verdict).toBe('unknown');
+    expect(res.reason).toBe('cancelled');
+    // 即使首解已存在，取消也不保留它
+    expect(res.solution).toBeNull();
+  }, 60000);
 });
